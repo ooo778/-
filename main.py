@@ -646,17 +646,17 @@ async def cmd_toplong(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def start_telegram_polling():
     if not TELEGRAM_TOKEN:
-        print("[WARN] TELEGRAM_TOKEN not set.")
+        print("[WARN] TELEGRAM_TOKEN not set; Telegram features disabled.")
         return
+    import asyncio
+    # >>> 新增這三行：在子執行緒建立並設定 event loop（Py3.12 必要）
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    # <<<
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("ping", cmd_ping))
-    application.add_handler(CommandHandler("top", cmd_top))
-    application.add_handler(CommandHandler("stats", cmd_stats))
-    application.add_handler(CommandHandler("follow", cmd_follow))
-    application.add_handler(CommandHandler("unfollow", cmd_unfollow))
-    application.add_handler(CommandHandler("discover", cmd_discover))
-    application.add_handler(CommandHandler("toplong", cmd_toplong))
     application.run_polling(drop_pending_updates=True)
+
 
 # ---------- Scheduler ----------
 def periodic_top_push():
