@@ -394,13 +394,14 @@ async def _post_validate_and_notify(sig: str, focus: set[str], ws_ts: float | No
         async with HTTP_SEM:
             tx = await rpc_http_get_transaction(sig)
         if not tx:
-            print(f"[VALIDATE] 交易 {sig} 沒有拿到資料；略過"); return
+            print(f"[VALIDATE] 交易 {sig} 沒有拿到資料；略過")
+            return
 
         ev_type, details = classify_event_by_tx(tx, focus)
 
         # —— 你要的一行除錯：為什麼沒有正式訊息 —— #
         if not ev_type:
-            print(f\"[CLASSIFY] skip {sig}: not NEW_POOL/ADD_LIQUIDITY\")
+            print(f"[CLASSIFY] skip {sig}: not NEW_POOL/ADD_LIQUIDITY")
             return
         # ----------------------------------------- #
 
@@ -408,7 +409,7 @@ async def _post_validate_and_notify(sig: str, focus: set[str], ws_ts: float | No
         if GOOD_ONLY:
             ok, why = await is_good_opportunity(tx)
             if not ok:
-                print(f\"[FILTER] drop {sig} because {why}\")
+                print(f"[FILTER] drop {sig} because {why}")
                 return
 
         pid = details.get("programId")
@@ -419,25 +420,25 @@ async def _post_validate_and_notify(sig: str, focus: set[str], ws_ts: float | No
         if not base or base not in QUOTED_BASES:
             base = JUP_BASE
         if not quote or quote in QUOTED_BASES:
-            keys = (tx.get("transaction") or {}).get("message",{}).get("accountKeys",[]) or []
-            mints = [k.get("pubkey") if isinstance(k,dict) else k for k in keys]
+            keys = (tx.get("transaction") or {}).get("message", {}).get("accountKeys", []) or []
+            mints = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
             quote = next((k for k in mints if k not in QUOTED_BASES), None)
 
-        buy_jup=buy_ray=sell_jup=sell_ray=""
+        buy_jup = buy_ray = sell_jup = sell_ray = ""
         if base and quote:
             buy_jup, buy_ray, sell_jup, sell_ray = build_trade_links(base, quote)
 
-        head = "🆕 新池建立" if ev_type=="NEW_POOL" else "➕ 加入流動性"
-        lat_ms = f\"\\n(延遲: {int((time.time()-ws_ts)*1000)}ms)\" if (SHOW_LATENCY and ws_ts) else ""
+        head = "🆕 新池建立" if ev_type == "NEW_POOL" else "➕ 加入流動性"
+        lat_ms = f"\n(延遲: {int((time.time() - ws_ts) * 1000)}ms)" if (SHOW_LATENCY and ws_ts) else ""
         text = (
-            f\"{head}  <b>{label}</b>\\n\"
-            f\"Sig: <code>{sig}</code>\\n{format_sig_link(sig)}\\n\"
-            f\"(已驗證{ ' + 過濾通過' if GOOD_ONLY else '' }){lat_ms}\"
+            f"{head}  <b>{label}</b>\n"
+            f"Sig: <code>{sig}</code>\n{format_sig_link(sig)}\n"
+            f"(已驗證{' + 過濾通過' if GOOD_ONLY else ''}){lat_ms}"
         )
         if buy_jup:
             text += (
-                f\"\\n\\n<b>一鍵下單</b>\\n• 買 Jupiter：{buy_jup}\\n• 買 Raydium：{buy_ray}\"
-                f\"\\n<b>一鍵賣出</b>\\n• 賣 Jupiter：{sell_jup}\\n• 賣 Raydium：{sell_ray}\"
+                f"\n\n<b>一鍵下單</b>\n• 買 Jupiter：{buy_jup}\n• 買 Raydium：{buy_ray}"
+                f"\n<b>一鍵賣出</b>\n• 賣 Jupiter：{sell_jup}\n• 賣 Raydium：{sell_ray}"
             )
         tg_send(text)
     except Exception as e:
