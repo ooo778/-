@@ -112,24 +112,53 @@ def _current_http_url():
     return HTTP_FALLBACK_URL if (HTTP_PUBLIC_FALLBACK and time.time() < _http_fallback_until) else RPC_HTTP_URL
 
 async def _http_post(payload: dict) -> dict:
-    """依回退狀態選擇 Helius 或公網；配額/429 自動切換一段時間"""
-    global _http_fallback_until
-    use_url = _current_http_url()
+    """
+    帶最小間隔 + 429 全域退讓 + 多重回退輪替
+    """
+    global _http_fallback_until, _http_last_call, _http_global_backoff_until, _http_fallback_idx
+
+    # 429 全域退讓
+    now = time.time()
+    if now < _http_global_backoff_until:
+        await asyncio.sleep(_http_global_backoff_until - now)
+
+    # 節流：控制 QPS
+    if HTTP_MIN_INTERVAL_MS > 0:
+        wait = max(0.0, (HTTP_MIN_INTERVAL_MS/1000.0) - (now - _http_last_call))
+        if wait > 0: await asyncio.sleep(wait)
+
+    # 選擇端點：主 or 回退池
+    if HTTP_PUBLIC_FALLBACK and time.time() < _http_fallback_until and HTTP_FALLBACK_URLS:
+        use_url = HTTP_FALLBACK_URLS[_http_fallback_idx % len(HTTP_FALLBACK_URLS)]
+    else:
+        use_url = RPC_HTTP_URL
+
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.post(use_url, json=payload)
+            _http_last_call = time.time()
             j = r.json()
             err = j.get("error")
-            if err:
-                code = err.get("code")
-                msg  = (err.get("message") or "").lower()
-                if HTTP_PUBLIC_FALLBACK and (code in (-32429, 429) or "max usage" in msg or "too many" in msg):
+            if not err:
+                return j
+
+            code = err.get("code")
+            msg  = (err.get("message") or "").lower()
+
+            # 命中限流：全域退讓 + 切到下一個回退端點
+            if (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg):
+                if HTTP_429_BACKOFF_MS > 0:
+                    _http_global_backoff_until = time.time() + (HTTP_429_BACKOFF_MS/1000.0)
+                    print(f"[HTTP] 429，暫停 {HTTP_429_BACKOFF_MS}ms")
+                if HTTP_PUBLIC_FALLBACK and HTTP_FALLBACK_URLS:
                     _http_fallback_until = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
-                    print(f"[HTTP] 主節點限流，切到 {HTTP_FALLBACK_URL} {HTTP_FALLBACK_COOLDOWN_SEC}s")
+                    _http_fallback_idx = (_http_fallback_idx + 1) % len(HTTP_FALLBACK_URLS)
+                    print(f"[HTTP] 主節點限流，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
             return j
     except Exception as e:
         print("[HTTP] request 失敗:", e)
         return {"error": {"message": str(e)}}
+
 
 async def rpc_http_get_transaction_once(sig: str) -> dict | None:
     j = await _http_post({
