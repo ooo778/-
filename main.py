@@ -111,6 +111,10 @@ def _mint_symbol(m: str) -> str:
 
 # =========================== HTTP 請求（節流 + 回退輪替） ===========================
 async def _http_post(payload: dict) -> dict:
+    """
+    帶最小間隔 + 429 全域退讓 + 多重回退輪替
+    並把 非JSON/純字串/非200 回應，統一包成 {"error": {...}}
+    """
     global _http_last_call, _http_global_backoff_until, _http_fallback_until, _http_fallback_idx
 
     now = time.time()
@@ -119,7 +123,8 @@ async def _http_post(payload: dict) -> dict:
 
     if HTTP_MIN_INTERVAL_MS > 0:
         wait = max(0.0, (HTTP_MIN_INTERVAL_MS/1000.0) - (now - _http_last_call))
-        if wait > 0: await asyncio.sleep(wait)
+        if wait > 0:
+            await asyncio.sleep(wait)
 
     if HTTP_PUBLIC_FALLBACK and time.time() < _http_fallback_until and HTTP_FALLBACK_URLS:
         use_url = HTTP_FALLBACK_URLS[_http_fallback_idx % len(HTTP_FALLBACK_URLS)]
@@ -130,25 +135,38 @@ async def _http_post(payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=8) as client:
             r = await client.post(use_url, json=payload)
             _http_last_call = time.time()
-            j = r.json()
-            err = j.get("error")
-            if not err:
-                return j
 
-            code = err.get("code")
-            msg  = (err.get("message") or "").lower()
-            if (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg):
-                if HTTP_429_BACKOFF_MS > 0:
-                    _http_global_backoff_until = time.time() + (HTTP_429_BACKOFF_MS/1000.0)
-                    print(f"[HTTP] 429，暫停 {HTTP_429_BACKOFF_MS}ms")
-                if HTTP_PUBLIC_FALLBACK and HTTP_FALLBACK_URLS:
-                    _http_fallback_until = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
-                    _http_fallback_idx = (_http_fallback_idx + 1) % len(HTTP_FALLBACK_URLS)
-                    print(f"[HTTP] 主節點限流，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
+            # ---- 強韌解析：任何非 dict 的結果，轉成 error dict ----
+            try:
+                j = r.json()
+            except Exception:
+                txt = (r.text or "").strip()
+                j = {"error": {"code": r.status_code, "message": f"non-json response: {txt[:160]}"}}
+
+            if not isinstance(j, dict):
+                j = {"error": {"code": r.status_code, "message": str(j)}}
+
+            if r.status_code >= 400 and "error" not in j:
+                j = {"error": {"code": r.status_code, "message": "http error"}}
+            # ---------------------------------------------------------
+
+            err = j.get("error")
+            if err:
+                code = err.get("code")
+                msg  = (err.get("message") or "").lower()
+                # 命中限流：全域退讓 + 輪替下一個回退端點
+                if (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg):
+                    if HTTP_429_BACKOFF_MS > 0:
+                        _http_global_backoff_until = time.time() + (HTTP_429_BACKOFF_MS/1000.0)
+                        print(f"[HTTP] 429，暫停 {HTTP_429_BACKOFF_MS}ms")
+                    if HTTP_PUBLIC_FALLBACK and HTTP_FALLBACK_URLS:
+                        _http_fallback_until = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
+                        _http_fallback_idx = (_http_fallback_idx + 1) % len(HTTP_FALLBACK_URLS)
+                        print(f"[HTTP] 主節點限流，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
             return j
     except Exception as e:
-        print("[HTTP] request 失敗:", e)
-        return {"error": {"message": str(e)}}
+        return {"error": {"message": f"request failure: {e}"}}
+
 
 async def rpc_http_get_transaction_once(sig: str) -> dict | None:
     j = await _http_post({
