@@ -167,10 +167,13 @@ async def ws_consume():
 
 async def _post_validate_and_notify(sig: str, focus: set[str]):
     try:
-        tx = await rpc_http_get_transaction(sig)
-        ev_type, details = classify_event_by_tx(tx, focus)
-        if not ev_type:
-            return  # 不符合目標事件，不通知
+      tx = await rpc_http_get_transaction(sig)
+if not tx:
+    print(f"[VALIDATE] 交易 {sig} 沒有拿到資料，略過")
+    return
+ev_type, details = classify_event_by_tx(tx, focus)
+
+
 
         pid = details.get("programId")
         label = program_label(pid)
