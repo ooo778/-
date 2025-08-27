@@ -66,10 +66,10 @@ HTTP_SEM = asyncio.Semaphore(max(1, HTTP_CONCURRENCY))
 
 # ========= Labels =========
 PROGRAM_LABELS = {
-  "CPMMoo8L3F4NbTegBCKVNunggL7H2pdTHKxQB5qKP1C": "Raydium CPMM",
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "Raydium CPMM",
   "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "Raydium AMM v4 (Legacy)",
-  "CAMMCzo5YLb4W4fF8KvHnrgWqKqVhmbLicVido4qvUFM5KAg8cTNwpY2Gff3uctyCc": "Raydium CLMM",
-  "whirLbMiicVdio4qvUFM5KAg8cTNwpY2Gff3uctyCc": "Orca Whirlpool",
+  "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "Raydium CLMM",
+  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "Orca Whirlpool",
 }
 
 # ========= State =========
