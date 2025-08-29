@@ -7,14 +7,23 @@ import requests, httpx, websockets
 load_dotenv()
 
 # =========================== 基本設定 ===========================
-# 預設 WS 用官方（不要吃到第三方 WS 限流）
-RPC_WS_URL   = os.getenv("RPC_WS_URL",   "wss://api.mainnet-beta.solana.com")
-WS_COMMITMENT = os.getenv("WS_COMMITMENT", "processed")  # processed 快 / confirmed 穩
-DISABLE_WS = os.getenv("DISABLE_WS", "0") == "1"         # 1=只用 webhook，不啟 WS
+RPC_WS_URL   = os.getenv("RPC_WS_URL", "wss://api.mainnet-beta.solana.com")
+WS_COMMITMENT = os.getenv("WS_COMMITMENT", "processed")  # processed / confirmed
+DISABLE_WS = os.getenv("DISABLE_WS", "0") == "1"
 
-# HTTP：主=官方（穩妥），備用（可選）= Helius（帶 key）
+# HTTP 主端點（建議官方），回退端點（建議放 Helius/Alchemy/QuickNode 等可保證 JSON 的服務）
 RPC_HTTP_URL = os.getenv("RPC_HTTP_URL", "https://api.mainnet-beta.solana.com")
+HTTP_PUBLIC_FALLBACK = os.getenv("HTTP_PUBLIC_FALLBACK", "1") == "1"
+HTTP_FALLBACK_URLS = [u.strip() for u in os.getenv(
+    "HTTP_FALLBACK_URLS", "https://mainnet.helius-rpc.com/?api-key=<YOUR_KEY>"
+).split(",") if u.strip() and "<YOUR_KEY>" not in u]
+HTTP_FALLBACK_COOLDOWN_SEC = int(os.getenv("HTTP_FALLBACK_COOLDOWN_SEC", "20"))
 
+# 各項節流/退讓
+HTTP_MIN_INTERVAL_MS = int(os.getenv("HTTP_MIN_INTERVAL_MS", "1200"))
+HTTP_429_BACKOFF_MS  = int(os.getenv("HTTP_429_BACKOFF_MS", "1800"))
+
+# 監控 Program
 PROGRAM_IDS = [p.strip() for p in os.getenv("PROGRAM_IDS", "").split(",") if p.strip()]
 
 # Telegram
@@ -22,37 +31,17 @@ TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # =========================== 行為調參 ===========================
-# 先查狀態，再抓交易；以下為抓交易重試參數
 TX_FETCH_RETRIES   = int(os.getenv("TX_FETCH_RETRIES", "2"))
 TX_FETCH_DELAY_MS  = int(os.getenv("TX_FETCH_DELAY_MS", "700"))
 
-# 佇列限速：每秒處理幾筆驗證
 PROCESS_QPS = float(os.getenv("PROCESS_QPS", "0.6"))
 MAX_QUEUE   = int(os.getenv("MAX_QUEUE", "300"))
 
-# 只看哪些事件（先只看新池，穩了再開加池）
 WATCH_NEW_POOL  = os.getenv("WATCH_NEW_POOL", "1") == "1"
 WATCH_ADDLP     = os.getenv("WATCH_ADDLP",  "0") == "1"
 
-# 預警（預設不使用，只發正式訊息）
 PRELIM_ALERT = os.getenv("PRELIM_ALERT", "0") == "1"
 PRELIM_LINKS = os.getenv("PRELIM_LINKS", "0") == "1"
-
-# =========================== HTTP 回退 / 節流 ===========================
-HTTP_PUBLIC_FALLBACK = os.getenv("HTTP_PUBLIC_FALLBACK", "1") == "1"
-HTTP_FALLBACK_COOLDOWN_SEC = int(os.getenv("HTTP_FALLBACK_COOLDOWN_SEC", "60"))
-# 建議只放可保證 JSON 的供應商（例如 Helius/Alchemy/QuickNode）
-HTTP_FALLBACK_URLS = [u.strip() for u in os.getenv(
-    "HTTP_FALLBACK_URLS", "https://mainnet.helius-rpc.com/?api-key=<YOUR_KEY>"
-).split(",") if u.strip() and "<YOUR_KEY>" not in u]
-
-HTTP_MIN_INTERVAL_MS = int(os.getenv("HTTP_MIN_INTERVAL_MS", "1200"))  # 兩次呼叫最小間隔
-HTTP_429_BACKOFF_MS  = int(os.getenv("HTTP_429_BACKOFF_MS", "1800"))   # 429 時全域暫停
-
-_http_last_call = 0.0
-_http_global_backoff_until = 0.0
-_http_fallback_until = 0.0
-_http_fallback_idx = 0
 
 # =========================== 一鍵下單/賣出 ===========================
 JUP_BASE = os.getenv("JUP_BASE", "So11111111111111111111111111111111111111112")  # wSOL
@@ -61,15 +50,15 @@ QUOTED_BASES = os.getenv(
     "So11111111111111111111111111111111111111112,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1"
 ).split(",")
 
-JUP_AMOUNT = os.getenv("JUP_AMOUNT", "0.25")              # 單位 = JUP_BASE
-JUP_SLIPPAGE_BPS = os.getenv("JUP_SLIPPAGE_BPS", "300")   # 300 = 3%
-SELL_AMOUNT = os.getenv("SELL_AMOUNT", "")                # 例：100（顆），留空=不帶數字
+JUP_AMOUNT = os.getenv("JUP_AMOUNT", "0.25")
+JUP_SLIPPAGE_BPS = os.getenv("JUP_SLIPPAGE_BPS", "300")
+SELL_AMOUNT = os.getenv("SELL_AMOUNT", "")
 SELL_SLIPPAGE_BPS = os.getenv("SELL_SLIPPAGE_BPS", JUP_SLIPPAGE_BPS)
 
 JUP_URL_BASE = os.getenv("JUP_URL_BASE", "https://jup.ag/swap")
 RAY_URL_BASE = os.getenv("RAY_URL_BASE", "https://raydium.io/swap/")
 
-# =========================== 可選濾網（先關掉） ===========================
+# =========================== 可選濾網（預設關閉） ===========================
 GOOD_ONLY = os.getenv("GOOD_ONLY", "0") == "1"
 REQUIRE_AUTH_NONE = os.getenv("REQUIRE_AUTH_NONE", "1") == "1"
 MAX_PRICE_IMPACT_BPS = int(os.getenv("MAX_PRICE_IMPACT_BPS", "1500"))
@@ -88,7 +77,13 @@ PROGRAM_LABELS = {
 # =========================== 狀態 ===========================
 SEEN_SIGS = deque(maxlen=20000)
 SEEN_SET  = set()
-REQUEUED_ONCE = set()   # 失敗後延遲重排一次的簽名
+REQUEUED_ONCE = set()
+
+# =========================== Provider 管理（每 provider 各自冷卻） ===========================
+PROVIDERS = [RPC_HTTP_URL] + [u for u in HTTP_FALLBACK_URLS if u and u != RPC_HTTP_URL]
+_prov_cooldown = {u: 0.0 for u in PROVIDERS}  # 各 provider 的冷卻截止時間
+_http_last_call = 0.0
+_http_global_backoff_until = 0.0
 
 # =========================== 小工具 ===========================
 def tg_send(text: str):
@@ -102,24 +97,16 @@ def tg_send(text: str):
     except Exception as e:
         print("[TG] 例外:", e)
 
-def program_label(pid):
-    return PROGRAM_LABELS.get(pid or "", pid or "Unknown Program")
-
-def format_sig_link(sig: str) -> str:
-    return f"https://solscan.io/tx/{sig}"
-
+def program_label(pid): return PROGRAM_LABELS.get(pid or "", pid or "Unknown Program")
+def format_sig_link(sig: str) -> str: return f"https://solscan.io/tx/{sig}"
 def _mint_symbol(m: str) -> str:
     if m == "So11111111111111111111111111111111111111112": return "SOL"
     if m == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1": return "USDC"
     return m[:4] + "…" + m[-4:]
 
-# =========================== HTTP 請求（節流 + 回退 + 強韌解析） ===========================
+# =========================== HTTP 請求（節流 + 429 全域退讓 + 每 provider 冷卻 + 強韌解析） ===========================
 async def _http_post(payload: dict) -> dict:
-    """
-    節流 + 全域退讓 + 回退輪替 + 強韌解析
-    不管對方回什麼，永遠回 dict（有錯就包在 {"error": {...}}）
-    """
-    global _http_last_call, _http_global_backoff_until, _http_fallback_until, _http_fallback_idx
+    global _http_last_call, _http_global_backoff_until, _prov_cooldown
 
     now = time.time()
     if now < _http_global_backoff_until:
@@ -127,31 +114,39 @@ async def _http_post(payload: dict) -> dict:
 
     if HTTP_MIN_INTERVAL_MS > 0:
         wait = max(0.0, (HTTP_MIN_INTERVAL_MS/1000.0) - (now - _http_last_call))
-        if wait > 0:
-            await asyncio.sleep(wait)
+        if wait > 0: await asyncio.sleep(wait)
 
-    if HTTP_PUBLIC_FALLBACK and time.time() < _http_fallback_until and HTTP_FALLBACK_URLS:
-        use_url = HTTP_FALLBACK_URLS[_http_fallback_idx % len(HTTP_FALLBACK_URLS)]
+    # 選 provider：主 > 其他；若都在冷卻，等最近解凍的那個
+    order = [RPC_HTTP_URL] + [u for u in PROVIDERS if u != RPC_HTTP_URL]
+    now = time.time()
+    ready = [u for u in order if now >= _prov_cooldown.get(u, 0.0)]
+    if not ready:
+        soonest = min(order, key=lambda u: _prov_cooldown.get(u, 0.0))
+        wait = max(0.0, _prov_cooldown.get(soonest, 0.0) - now)
+        if wait > 0:
+            print(f"[HTTP] 所有 provider 冷卻中，等待 {int(wait*1000)}ms")
+            await asyncio.sleep(wait)
+        use_url = soonest
     else:
-        use_url = RPC_HTTP_URL
+        use_url = ready[0]
 
     try:
         async with httpx.AsyncClient(timeout=8, headers={"Content-Type": "application/json"}) as client:
             r = await client.post(use_url, json=payload)
             _http_last_call = time.time()
 
-            # 盡力解析 JSON；否則包成 error
+            # 強韌解析：確保回 dict
             try:
                 j = r.json()
             except Exception:
                 txt = (r.text or "").strip()
                 j = {"error": {"code": r.status_code, "message": f"non-json response: {txt[:160]}"}}
-
             if not isinstance(j, dict):
                 j = {"error": {"code": r.status_code, "message": str(j)}}
             if r.status_code >= 400 and "error" not in j:
                 j = {"error": {"code": r.status_code, "message": "http error"}}
 
+            # 針對「該 provider」冷卻；同時觸發全域退讓
             err = j.get("error")
             if err:
                 code = err.get("code")
@@ -159,17 +154,17 @@ async def _http_post(payload: dict) -> dict:
                 is_rate = (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg)
                 is_bad  = ("non-json" in msg) or ("request failure" in msg) or ("http error" in msg)
                 if is_rate or is_bad:
+                    _prov_cooldown[use_url] = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
+                    print(f"[HTTP] provider 冷卻：{use_url}  {HTTP_FALLBACK_COOLDOWN_SEC}s")
                     if HTTP_429_BACKOFF_MS > 0:
                         _http_global_backoff_until = time.time() + (HTTP_429_BACKOFF_MS/1000.0)
-                        print(f"[HTTP] 暫停 {HTTP_429_BACKOFF_MS}ms")
-                    if HTTP_PUBLIC_FALLBACK and HTTP_FALLBACK_URLS:
-                        _http_fallback_until = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
-                        _http_fallback_idx = (_http_fallback_idx + 1) % len(HTTP_FALLBACK_URLS)
-                        print(f"[HTTP] 主節點限流/異常，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
+                        print(f"[HTTP] 全域暫停 {HTTP_429_BACKOFF_MS}ms")
             return j
     except Exception as e:
+        _prov_cooldown[use_url] = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
         return {"error": {"message": f"request failure: {e}"}}
 
+# =========================== RPC 包裝 ===========================
 async def rpc_http_get_transaction_once(sig: str):
     j = await _http_post({
         "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
@@ -194,20 +189,16 @@ async def rpc_http_get_signature_status(sig: str):
     return None
 
 async def rpc_http_get_transaction(sig: str):
-    """
-    先輪詢 getSignatureStatuses，等到 confirmed/finalized 再打 getTransaction，
-    減少沒準備好時的空打，降低 429 機率。
-    """
-    # 1) 先等到確認（最多 6 次、漸增延遲）
+    # 1) 先等到 confirmed/finalized（最多 6 次，指數回退）
     delay = 0.5
     for _ in range(6):
         st = await rpc_http_get_signature_status(sig)
         if st in ("confirmed", "finalized"):
             break
         await asyncio.sleep(delay)
-        delay *= 1.4  # 0.5 -> 0.7 -> 1.0 -> 1.4 -> ...
+        delay *= 1.4
 
-    # 2) 再拉交易（小次數、漸增延遲）
+    # 2) 再拉交易（小次數，指數回退）
     delay = TX_FETCH_DELAY_MS / 1000.0
     for _ in range(max(1, TX_FETCH_RETRIES)):
         tx = await rpc_http_get_transaction_once(sig)
@@ -217,7 +208,7 @@ async def rpc_http_get_transaction(sig: str):
         delay *= 1.5
     return None
 
-# =========================== 解析邏輯 ===========================
+# =========================== 事件判別 ===========================
 INIT_KEYS  = {"initialize", "initialize2", "initialize_pool", "init_pool", "create_pool", "open_position", "initialize_tick_array", "initialize_config"}
 ADDLP_KEYS = {"add_liquidity", "deposit_liquidity", "increase_liquidity"}
 
@@ -226,102 +217,77 @@ def _match_type_like(s: str, keys: set) -> bool:
     return any(k in s for k in keys)
 
 def extract_program_instructions(tx: dict):
-    if not tx:
-        return []
+    if not tx: return []
     res = []
     msg = (tx.get("transaction") or {}).get("message") or {}
-    for ins in (msg.get("instructions") or []):
-        res.append(ins)
+    for ins in (msg.get("instructions") or []): res.append(ins)
     meta = tx.get("meta") or {}
     for grp in (meta.get("innerInstructions") or []):
-        for ins in grp.get("instructions", []):
-            res.append(ins)
+        for ins in grp.get("instructions", []): res.append(ins)
     return res
 
 def classify_event_by_tx(tx: dict, focus: set):
-    if not tx:
-        return None, {}
-    hit_prog = None
-    hit_type = None
+    if not tx: return None, {}
+    hit_prog = None; hit_type = None
     for ins in extract_program_instructions(tx):
         pid = ins.get("programId")
-        if not pid or pid not in focus:
-            continue
+        if not pid or pid not in focus: continue
         parsed = ins.get("parsed") or {}
         t = (parsed.get("type") or parsed.get("instruction")) or ""
-        if _match_type_like(t, INIT_KEYS):
-            hit_prog, hit_type = pid, "NEW_POOL"
-            break
-        if _match_type_like(t, ADDLP_KEYS):
-            hit_prog, hit_type = pid, "ADD_LIQUIDITY"
+        if _match_type_like(t, INIT_KEYS):  hit_prog, hit_type = pid, "NEW_POOL"; break
+        if _match_type_like(t, ADDLP_KEYS): hit_prog, hit_type = pid, "ADD_LIQUIDITY"
     if not hit_type:
         meta = tx.get("meta") or {}
         logs = " ".join((meta.get("logMessages") or [])).lower()
         if any(pid in (tx.get("transaction") or {}).get("message", {}).get("accountKeys", []) for pid in focus):
-            if _match_type_like(logs, INIT_KEYS):
-                hit_type = "NEW_POOL"
-            elif _match_type_like(logs, ADDLP_KEYS):
-                hit_type = "ADD_LIQUIDITY"
+            if _match_type_like(logs, INIT_KEYS):  hit_type = "NEW_POOL"
+            elif _match_type_like(logs, ADDLP_KEYS): hit_type = "ADD_LIQUIDITY"
             if hit_type:
                 for k in focus:
-                    if k in logs:
-                        hit_prog = k
-                        break
+                    if k in logs: hit_prog = k; break
     return hit_type, {"programId": hit_prog}
 
 def logs_hint_is_candidate(logs: list) -> bool:
     s = " ".join((logs or [])).lower()
-    if not s:
-        return False
+    if not s: return False
     hit_init  = any(k in s for k in INIT_KEYS)
     hit_addlp = any(k in s for k in ADDLP_KEYS)
-    if WATCH_NEW_POOL and hit_init:
-        return True
-    if WATCH_ADDLP and hit_addlp:
-        return True
+    if WATCH_NEW_POOL and hit_init: return True
+    if WATCH_ADDLP   and hit_addlp: return True
     return False
 
 # =========================== 交易對 / 濾網輔助 ===========================
 def guess_pair_from_tx(tx: dict):
-    if not tx:
-        return (None, None)
+    if not tx: return (None, None)
     keys = (tx.get("transaction") or {}).get("message", {}).get("accountKeys", []) or []
     mints = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
     base = None
     for b in QUOTED_BASES:
-        if b in mints:
-            base = b
-            break
-    if not base:
-        return (None, None)
+        if b in mints: base = b; break
+    if not base: return (None, None)
     quote = None
     for pk in mints:
         if pk != base and pk not in QUOTED_BASES:
-            quote = pk
-            break
+            quote = pk; break
     return (base, quote)
 
 async def get_mint_info(mint_pubkey: str):
     j = await _http_post({"jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
                           "params": [mint_pubkey, {"encoding": "jsonParsed"}]})
-    if "error" in j:
-        return None
+    if "error" in j: return None
     v = (j.get("result") or {}).get("value") or {}
     return (v.get("data") or {}).get("parsed", {}).get("info")
 
 async def get_top_holders_pct(mint_pubkey: str):
     j = await _http_post({"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts",
                           "params": [mint_pubkey, {"commitment": "confirmed"}]})
-    if "error" in j:
-        return None
+    if "error" in j: return None
     vals = (j.get("result") or {}).get("value") or []
     top = sum([float(x.get("uiAmount", 0)) for x in vals[:10]])
     info = await get_mint_info(mint_pubkey)
-    if not info:
-        return None
+    if not info: return None
     supply = float(info.get("supply", 0)) / (10 ** int(info.get("decimals", 0)))
-    if supply <= 0:
-        return None
+    if supply <= 0: return None
     return (top / supply) * 100.0
 
 async def jup_has_reasonable_route(mint_in: str, mint_out: str, in_amount: int):
@@ -331,8 +297,7 @@ async def jup_has_reasonable_route(mint_in: str, mint_out: str, in_amount: int):
             r = await client.get(JUP_QUOTE_URL, params=params)
             q = r.json()
             routes = q.get("data") or []
-            if not routes:
-                return (False, 99999)
+            if not routes: return (False, 99999)
             rt = routes[0]
             if not float(rt.get("inAmount", 0)) or not float(rt.get("outAmount", 0)):
                 return (False, 99999)
@@ -344,26 +309,19 @@ async def jup_has_reasonable_route(mint_in: str, mint_out: str, in_amount: int):
 
 async def is_good_opportunity(tx: dict):
     base, quote = guess_pair_from_tx(tx)
-    if not base or not quote:
-        return (False, "pair_not_supported")
-    if base not in QUOTED_BASES and quote not in QUOTED_BASES:
-        return (False, "no_whitelisted_base")
-    if base not in QUOTED_BASES:
-        base, quote = quote, base
+    if not base or not quote: return (False, "pair_not_supported")
+    if base not in QUOTED_BASES and quote not in QUOTED_BASES: return (False, "no_whitelisted_base")
+    if base not in QUOTED_BASES: base, quote = quote, base
     if REQUIRE_AUTH_NONE:
         mi = await get_mint_info(quote)
-        if not mi:
-            return (False, "mint_info_unavailable")
+        if not mi: return (False, "mint_info_unavailable")
         if mi.get("mintAuthority") is not None or mi.get("freezeAuthority") is not None:
             return (False, "mint_or_freeze_not_none")
     ok, imp_bps = await jup_has_reasonable_route(base, quote, JUP_TEST_IN_LAMPORTS)
-    if not ok:
-        return (False, "no_jup_route")
-    if imp_bps and imp_bps > MAX_PRICE_IMPACT_BPS:
-        return (False, f"price_impact_too_high_{imp_bps}")
+    if not ok: return (False, "no_jup_route")
+    if imp_bps and imp_bps > MAX_PRICE_IMPACT_BPS: return (False, f"price_impact_too_high_{imp_bps}")
     pct = await get_top_holders_pct(quote)
-    if pct is None or pct > MAX_TOP10_HOLDER_PCT:
-        return (False, f"top10_holder_{pct or 'NA'}")
+    if pct is None or pct > MAX_TOP10_HOLDER_PCT: return (False, f"top10_holder_{pct or 'NA'}")
     return (True, "ok")
 
 # =========================== 一鍵連結 ===========================
@@ -388,15 +346,12 @@ async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None):
     try:
         tx = await rpc_http_get_transaction(sig)
         if not tx:
-            # 第一次失敗：延遲重排一次（避免撞到 provider 窗口）
             if sig not in REQUEUED_ONCE:
                 REQUEUED_ONCE.add(sig)
                 print(f"[VALIDATE] 交易 {sig} 暫時取不到，2s 後重排一次")
                 await asyncio.sleep(2.0)
-                try:
-                    PROCESS_QUEUE.put_nowait((sig, ws_ts or time.time()))
-                except asyncio.QueueFull:
-                    pass
+                try: PROCESS_QUEUE.put_nowait((sig, ws_ts or time.time()))
+                except asyncio.QueueFull: pass
                 return
             print(f"[VALIDATE] 交易 {sig} 二次仍失敗；略過")
             return
@@ -405,7 +360,6 @@ async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None):
         if not ev_type:
             print(f"[CLASSIFY] skip {sig}: not NEW_POOL/ADD_LIQUIDITY")
             return
-
         if ev_type == "NEW_POOL" and not WATCH_NEW_POOL: return
         if ev_type == "ADD_LIQUIDITY" and not WATCH_ADDLP: return
 
@@ -419,14 +373,13 @@ async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None):
         label = program_label(pid)
 
         base, quote = guess_pair_from_tx(tx)
-        if not base or base not in QUOTED_BASES:
-            base = JUP_BASE
+        if not base or base not in QUOTED_BASES: base = JUP_BASE
         if not quote or quote in QUOTED_BASES:
             keys = (tx.get("transaction") or {}).get("message", {}).get("accountKeys", []) or []
             mints = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
             quote = next((k for k in mints if k not in QUOTED_BASES), None)
 
-        buy_jup = buy_ray = sell_jup = sell_ray = ""
+        buy_jup=buy_ray=sell_jup=sell_ray=""
         if base and quote:
             buy_jup, buy_ray, sell_jup, sell_ray = build_trade_links(base, quote)
 
@@ -456,8 +409,7 @@ async def process_worker(focus: set):
         sig, ws_ts = await PROCESS_QUEUE.get()
         now = time.time()
         wait = interval - (now - last)
-        if wait > 0:
-            await asyncio.sleep(wait)
+        if wait > 0: await asyncio.sleep(wait)
         last = time.time()
         try:
             await _post_validate_and_notify(sig, focus, ws_ts)
@@ -469,7 +421,6 @@ async def ws_consume():
     if not PROGRAM_IDS:
         raise RuntimeError("PROGRAM_IDS 不可為空")
     focus = set(PROGRAM_IDS)
-
     backoff, backoff_max = 5, 120
     while True:
         try:
@@ -484,21 +435,15 @@ async def ws_consume():
                         "params": [{"mentions": [pid]}, {"commitment": WS_COMMITMENT}]
                     }))
                 print("[WS] Subscribed to", PROGRAM_IDS)
-
                 while True:
                     msg = json.loads(await ws.recv())
-                    if msg.get("method") != "logsNotification":
-                        continue
+                    if msg.get("method") != "logsNotification": continue
                     val = ((msg.get("params") or {}).get("result") or {}).get("value") or {}
                     sig, logs = val.get("signature"), (val.get("logs") or [])
                     ws_ts = time.time()
-                    if not sig or sig in SEEN_SET:
-                        continue
-                    if not logs_hint_is_candidate(logs):
-                        continue
+                    if not sig or sig in SEEN_SET: continue
+                    if not logs_hint_is_candidate(logs): continue
                     SEEN_SET.add(sig); SEEN_SIGS.append(sig)
-
-                    # 推進佇列（滿了就丟最舊的）
                     try:
                         PROCESS_QUEUE.put_nowait((sig, ws_ts))
                     except asyncio.QueueFull:
@@ -510,20 +455,19 @@ async def ws_consume():
                         PROCESS_QUEUE.put_nowait((sig, ws_ts))
         except websockets.exceptions.InvalidStatusCode as e:
             code = getattr(e, "status_code", None)
-            wait = max(1.0, backoff + random.uniform(-0.2 * backoff, 0.2 * backoff))
+            wait = max(1.0, backoff + random.uniform(-0.2*backoff, 0.2*backoff))
             print(f"[WS] 連線被拒 (HTTP {code})，{wait:.1f}s 後重連")
             await asyncio.sleep(wait); backoff = min(backoff * 2, backoff_max)
         except Exception as e:
-            wait = max(1.0, backoff + random.uniform(-0.2 * backoff, 0.2 * backoff))
+            wait = max(1.0, backoff + random.uniform(-0.2*backoff, 0.2*backoff))
             print(f"[WS] 連線中斷：{e}，{wait:.1f}s 後重連")
             await asyncio.sleep(wait); backoff = min(backoff * 2, backoff_max)
 
-# =========================== Flask ===========================
+# =========================== Flask（Webhook） ===========================
 app = Flask(__name__)
 
 @app.get("/healthz")
-def healthz():
-    return "ok", 200
+def healthz(): return "ok", 200
 
 @app.post("/helius")
 def helius_hook():
@@ -533,8 +477,7 @@ def helius_hook():
         handled = 0
         for ev in events:
             sig = ev.get("signature") or ev.get("transaction", "")
-            if not sig or sig in SEEN_SET:
-                continue
+            if not sig or sig in SEEN_SET: continue
             SEEN_SET.add(sig); SEEN_SIGS.append(sig)
             asyncio.run_coroutine_threadsafe(
                 _post_validate_and_notify(sig, set(PROGRAM_IDS), time.time()), loop
