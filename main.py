@@ -342,9 +342,9 @@ def build_trade_links(base_mint: str, quote_mint: str):
     return buy_jup, buy_ray, sell_jup, sell_ray
 
 # =========================== 正式處理 ===========================
-async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None):
+async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None, tx_override: dict | None = None):
     try:
-        tx = await rpc_http_get_transaction(sig)
+        tx = tx_override or await rpc_http_get_transaction(sig)
         if not tx:
             if sig not in REQUEUED_ONCE:
                 REQUEUED_ONCE.add(sig)
@@ -476,11 +476,20 @@ def helius_hook():
         events = data if isinstance(data, list) else [data]
         handled = 0
         for ev in events:
-            sig = ev.get("signature") or ev.get("transaction", "")
-            if not sig or sig in SEEN_SET: continue
+            sig = ev.get("signature") or (ev.get("transaction", {}) or {}).get("signature") or ""
+            if not sig or sig in SEEN_SET: 
+                continue
+            # 可能出現在不同欄位，盡量撈到完整交易
+            tx_payload = (
+                ev.get("transaction") or
+                ev.get("enhancedTransaction") or
+                ev.get("parsedTransaction") or
+                ev.get("meta")  # 有些方案把 tx 放在 meta 內
+            )
             SEEN_SET.add(sig); SEEN_SIGS.append(sig)
             asyncio.run_coroutine_threadsafe(
-                _post_validate_and_notify(sig, set(PROGRAM_IDS), time.time()), loop
+                _post_validate_and_notify(sig, set(PROGRAM_IDS), time.time(), tx_override=tx_payload),
+                loop
             )
             handled += 1
         return jsonify({"ok": True, "handled": handled}), 200
