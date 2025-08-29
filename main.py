@@ -10,41 +10,40 @@ load_dotenv()
 RPC_HTTP_URL = os.getenv("RPC_HTTP_URL", "https://api.mainnet-beta.solana.com")
 RPC_WS_URL   = os.getenv("RPC_WS_URL",   "wss://api.mainnet-beta.solana.com")
 WS_COMMITMENT = os.getenv("WS_COMMITMENT", "processed")  # processed 快 / confirmed 穩
+DISABLE_WS = os.getenv("DISABLE_WS","0") == "1"          # 1=只用 webhook，不啟 WS
 
 PROGRAM_IDS = [p.strip() for p in os.getenv("PROGRAM_IDS","").split(",") if p.strip()]
 
+# Telegram
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN","")
 TG_CHAT  = os.getenv("TELEGRAM_CHAT_ID","")
 
-# 可選：僅 webhook 運行（關掉 WS）
-DISABLE_WS = os.getenv("DISABLE_WS","0") == "1"
-
 # =========================== 行為調參 ===========================
-# 解析重試
-TX_FETCH_RETRIES   = int(os.getenv("TX_FETCH_RETRIES", "2"))
-TX_FETCH_DELAY_MS  = int(os.getenv("TX_FETCH_DELAY_MS", "350"))
+# getTransaction 重試
+TX_FETCH_RETRIES   = int(os.getenv("TX_FETCH_RETRIES", "1"))
+TX_FETCH_DELAY_MS  = int(os.getenv("TX_FETCH_DELAY_MS", "500"))
 
-# 佇列限速（每秒處理幾筆 getTransaction）
-PROCESS_QPS = float(os.getenv("PROCESS_QPS", "2"))
+# 佇列限速：每秒處理幾筆驗證
+PROCESS_QPS = float(os.getenv("PROCESS_QPS", "1"))
 MAX_QUEUE   = int(os.getenv("MAX_QUEUE", "300"))
 
-# 僅看哪類事件
+# 只看哪些事件（先只看新池，穩了再開加池）
 WATCH_NEW_POOL  = os.getenv("WATCH_NEW_POOL", "1") == "1"
-WATCH_ADDLP     = os.getenv("WATCH_ADDLP",  "0") == "1"  # 預設關掉加池，先驗路徑
+WATCH_ADDLP     = os.getenv("WATCH_ADDLP",  "0") == "1"
 
-# 僅發正式訊息（預設就是）
-PRELIM_ALERT = os.getenv("PRELIM_ALERT","0") == "1"   # 仍可開，但預設關
+# 預警（預設不使用，只發正式訊息）
+PRELIM_ALERT = os.getenv("PRELIM_ALERT","0") == "1"
 PRELIM_LINKS = os.getenv("PRELIM_LINKS","0") == "1"
 
 # =========================== HTTP 回退 / 節流 ===========================
 HTTP_PUBLIC_FALLBACK = os.getenv("HTTP_PUBLIC_FALLBACK","1") == "1"
 HTTP_FALLBACK_COOLDOWN_SEC = int(os.getenv("HTTP_FALLBACK_COOLDOWN_SEC","60"))
 HTTP_FALLBACK_URLS = [u.strip() for u in os.getenv(
-    "HTTP_FALLBACK_URLS", "https://api.mainnet-beta.solana.com,https://rpc.ankr.com/solana"
+    "HTTP_FALLBACK_URLS", "https://api.mainnet-beta.solana.com"
 ).split(",") if u.strip()]
 
-HTTP_MIN_INTERVAL_MS = int(os.getenv("HTTP_MIN_INTERVAL_MS", "400"))  # 兩次呼叫最小間隔
-HTTP_429_BACKOFF_MS  = int(os.getenv("HTTP_429_BACKOFF_MS", "1200"))  # 429 時全域暫停
+HTTP_MIN_INTERVAL_MS = int(os.getenv("HTTP_MIN_INTERVAL_MS", "800"))  # 兩次呼叫最小間隔
+HTTP_429_BACKOFF_MS  = int(os.getenv("HTTP_429_BACKOFF_MS", "1500"))  # 429 時全域暫停
 
 _http_last_call = 0.0
 _http_global_backoff_until = 0.0
@@ -109,11 +108,11 @@ def _mint_symbol(m: str) -> str:
     if m == "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1": return "USDC"
     return m[:4] + "…" + m[-4:]
 
-# =========================== HTTP 請求（節流 + 回退輪替） ===========================
+# =========================== HTTP 請求（節流 + 回退 + 強韌解析） ===========================
 async def _http_post(payload: dict) -> dict:
     """
-    帶最小間隔 + 429 全域退讓 + 多重回退輪替
-    並把 非JSON/純字串/非200 回應，統一包成 {"error": {...}}
+    節流 + 全域退讓 + 回退輪替 + 強韌解析
+    不管對方回什麼，永遠回 dict（有錯就包在 {"error": {...}}）
     """
     global _http_last_call, _http_global_backoff_until, _http_fallback_until, _http_fallback_idx
 
@@ -132,11 +131,11 @@ async def _http_post(payload: dict) -> dict:
         use_url = RPC_HTTP_URL
 
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with httpx.AsyncClient(timeout=8, headers={"Content-Type":"application/json"}) as client:
             r = await client.post(use_url, json=payload)
             _http_last_call = time.time()
 
-            # ---- 強韌解析：任何非 dict 的結果，轉成 error dict ----
+            # 盡力解析 JSON；否則包成 error
             try:
                 j = r.json()
             except Exception:
@@ -145,28 +144,26 @@ async def _http_post(payload: dict) -> dict:
 
             if not isinstance(j, dict):
                 j = {"error": {"code": r.status_code, "message": str(j)}}
-
             if r.status_code >= 400 and "error" not in j:
                 j = {"error": {"code": r.status_code, "message": "http error"}}
-            # ---------------------------------------------------------
 
             err = j.get("error")
             if err:
                 code = err.get("code")
                 msg  = (err.get("message") or "").lower()
-                # 命中限流：全域退讓 + 輪替下一個回退端點
-                if (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg):
+                is_rate = (code in (-32429, 429)) or ("too many" in msg) or ("max usage" in msg)
+                is_bad  = ("non-json" in msg) or ("request failure" in msg) or ("http error" in msg)
+                if is_rate or is_bad:
                     if HTTP_429_BACKOFF_MS > 0:
                         _http_global_backoff_until = time.time() + (HTTP_429_BACKOFF_MS/1000.0)
-                        print(f"[HTTP] 429，暫停 {HTTP_429_BACKOFF_MS}ms")
+                        print(f"[HTTP] 暫停 {HTTP_429_BACKOFF_MS}ms")
                     if HTTP_PUBLIC_FALLBACK and HTTP_FALLBACK_URLS:
                         _http_fallback_until = time.time() + HTTP_FALLBACK_COOLDOWN_SEC
                         _http_fallback_idx = (_http_fallback_idx + 1) % len(HTTP_FALLBACK_URLS)
-                        print(f"[HTTP] 主節點限流，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
+                        print(f"[HTTP] 主節點限流/異常，輪替到 {HTTP_FALLBACK_URLS[_http_fallback_idx]} {HTTP_FALLBACK_COOLDOWN_SEC}s")
             return j
     except Exception as e:
         return {"error": {"message": f"request failure: {e}"}}
-
 
 async def rpc_http_get_transaction_once(sig: str) -> dict | None:
     j = await _http_post({
@@ -197,8 +194,7 @@ async def rpc_http_get_transaction(sig: str) -> dict | None:
         if i % 2 == 0:
             st = await rpc_http_get_signature_status(sig)
             if st: print(f"[VALIDATE] 交易 {sig} 狀態：{st}（第 {i+1} 次）")
-        await asyncio.sleep(delay)
-        delay *= 1.5
+        await asyncio.sleep(delay); delay *= 1.5
     return None
 
 # =========================== 解析邏輯 ===========================
