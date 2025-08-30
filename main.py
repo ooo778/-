@@ -342,9 +342,9 @@ def build_trade_links(base_mint: str, quote_mint: str):
     return buy_jup, buy_ray, sell_jup, sell_ray
 
 # =========================== 正式處理 ===========================
-async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None, tx_override: dict | None = None):
+async def _post_validate_and_notify(sig: str, focus: set, ws_ts: float = None):
     try:
-        tx = tx_override or await rpc_http_get_transaction(sig)
+        tx = await rpc_http_get_transaction(sig)
         if not tx:
             if sig not in REQUEUED_ONCE:
                 REQUEUED_ONCE.add(sig)
@@ -469,46 +469,23 @@ app = Flask(__name__)
 @app.get("/healthz")
 def healthz(): return "ok", 200
 
-from flask import Flask, request
-import json
-
-app = Flask(__name__)
-
-@app.route("/helius", methods=["POST"])
-data = request.json
-
-print("[WEBHOOK RAW]", data)
-
-tx_signature = None
-# 1. 如果 payload 直接有 signature (舊模式)
-if isinstance(data, list) and "signature" in data[0]:
-    tx_signature = data[0]["signature"]
-
-# 2. 如果是 transaction JSON
-elif isinstance(data, dict) and "transaction" in data:
-    if "signatures" in data["transaction"]:
-        tx_signature = data["transaction"]["signatures"][0]
-
-if not tx_signature:
-    print("[ERROR] No valid signature found, skip")
-    return {"ok": False}, 200
-
-print(f"[OK] Parsed signature: {tx_signature}")
-process_signature(tx_signature)   # 這裡進入你的 classify + validate
-return {"ok": True}, 200
-
-
-            # 送去你原本的 classify + validate pipeline
-            classify_and_process(tx)
-
-            handled_count += 1
-
-        return {"handled": handled_count, "ok": True}
-
+@app.post("/helius")
+def helius_hook():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        events = data if isinstance(data, list) else [data]
+        handled = 0
+        for ev in events:
+            sig = ev.get("signature") or ev.get("transaction", "")
+            if not sig or sig in SEEN_SET: continue
+            SEEN_SET.add(sig); SEEN_SIGS.append(sig)
+            asyncio.run_coroutine_threadsafe(
+                _post_validate_and_notify(sig, set(PROGRAM_IDS), time.time()), loop
+            )
+            handled += 1
+        return jsonify({"ok": True, "handled": handled}), 200
     except Exception as e:
-        print("[WEBHOOK ERROR]", str(e))
-        return {"handled": 0, "ok": False, "error": str(e)}, 500
-
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 def run_flask():
     port = int(os.getenv("PORT", "8080"))
