@@ -469,32 +469,52 @@ app = Flask(__name__)
 @app.get("/healthz")
 def healthz(): return "ok", 200
 
-@app.post("/helius")
-def helius_hook():
+from flask import Flask, request
+import json
+
+app = Flask(__name__)
+
+@app.route("/helius", methods=["POST"])
+def helius_webhook():
     try:
-        data = request.get_json(force=True, silent=True) or {}
-        events = data if isinstance(data, list) else [data]
-        handled = 0
-        for ev in events:
-            sig = ev.get("signature") or (ev.get("transaction", {}) or {}).get("signature") or ""
-            if not sig or sig in SEEN_SET: 
+        data = request.get_json(force=True)
+
+        # Debug：完整印出 webhook payload，先確認格式
+        print("[WEBHOOK RAW]", json.dumps(data, indent=2, ensure_ascii=False))
+
+        handled_count = 0
+
+        # Helius webhook 送進來的是「陣列」
+        for tx in data:
+            sig = None
+
+            # 先試一般 webhook 結構
+            if "signature" in tx:
+                sig = tx["signature"]
+
+            # 如果沒有，就抓 transaction 裡面的 signatures[0]
+            elif "transaction" in tx and "signatures" in tx["transaction"]:
+                sigs = tx["transaction"]["signatures"]
+                if sigs and len(sigs[0]) == 88:
+                    sig = sigs[0]
+
+            if not sig or len(sig) != 88:
+                print(f"[ERROR] Invalid signature: {sig}")
                 continue
-            # 可能出現在不同欄位，盡量撈到完整交易
-            tx_payload = (
-                ev.get("transaction") or
-                ev.get("enhancedTransaction") or
-                ev.get("parsedTransaction") or
-                ev.get("meta")  # 有些方案把 tx 放在 meta 內
-            )
-            SEEN_SET.add(sig); SEEN_SIGS.append(sig)
-            asyncio.run_coroutine_threadsafe(
-                _post_validate_and_notify(sig, set(PROGRAM_IDS), time.time(), tx_override=tx_payload),
-                loop
-            )
-            handled += 1
-        return jsonify({"ok": True, "handled": handled}), 200
+
+            print(f"[OK] Got signature: {sig}")
+
+            # 送去你原本的 classify + validate pipeline
+            classify_and_process(tx)
+
+            handled_count += 1
+
+        return {"handled": handled_count, "ok": True}
+
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        print("[WEBHOOK ERROR]", str(e))
+        return {"handled": 0, "ok": False, "error": str(e)}, 500
+
 
 def run_flask():
     port = int(os.getenv("PORT", "8080"))
