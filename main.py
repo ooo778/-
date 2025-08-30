@@ -475,34 +475,28 @@ import json
 app = Flask(__name__)
 
 @app.route("/helius", methods=["POST"])
-def helius_webhook():
-    try:
-        data = request.get_json(force=True)
+data = request.json
 
-        # Debug：完整印出 webhook payload，先確認格式
-        print("[WEBHOOK RAW]", json.dumps(data, indent=2, ensure_ascii=False))
+print("[WEBHOOK RAW]", data)
 
-        handled_count = 0
+tx_signature = None
+# 1. 如果 payload 直接有 signature (舊模式)
+if isinstance(data, list) and "signature" in data[0]:
+    tx_signature = data[0]["signature"]
 
-        # Helius webhook 送進來的是「陣列」
-        for tx in data:
-            sig = None
+# 2. 如果是 transaction JSON
+elif isinstance(data, dict) and "transaction" in data:
+    if "signatures" in data["transaction"]:
+        tx_signature = data["transaction"]["signatures"][0]
 
-            # 先試一般 webhook 結構
-            if "signature" in tx:
-                sig = tx["signature"]
+if not tx_signature:
+    print("[ERROR] No valid signature found, skip")
+    return {"ok": False}, 200
 
-            # 如果沒有，就抓 transaction 裡面的 signatures[0]
-            elif "transaction" in tx and "signatures" in tx["transaction"]:
-                sigs = tx["transaction"]["signatures"]
-                if sigs and len(sigs[0]) == 88:
-                    sig = sigs[0]
+print(f"[OK] Parsed signature: {tx_signature}")
+process_signature(tx_signature)   # 這裡進入你的 classify + validate
+return {"ok": True}, 200
 
-            if not sig or len(sig) != 88:
-                print(f"[ERROR] Invalid signature: {sig}")
-                continue
-
-            print(f"[OK] Got signature: {sig}")
 
             # 送去你原本的 classify + validate pipeline
             classify_and_process(tx)
